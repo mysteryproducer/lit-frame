@@ -1,0 +1,38 @@
+menu "Application Configuration"
+
+    config APP_I2C_SCL_GPIO
+        int "SCL GPIO Num"
+        range 0 50
+        default 1
+        help
+            GPIO number for I2C Master clock line.
+
+    config APP_I2C_SDA_GPIO
+        int "SDA GPIO Num"
+        range 0 50
+        default 2
+        help
+            GPIO number for I2C Master data line.
+
+    config APP_INT_GPIO
+        int "INT GPIO Num"
+        range -1 50
+        default -1
+        help
+            GPIO number for interrupt data line.
+
+    config APP_I2C_CLOCK_SPEED_HZ
+        int "I2C Clock Speed"
+        range 100 1000000
+        default 400000
+        help
+            I2C clock speed in Hz.
+    
+    config APP_LEDC_OUTPUT_GPIO
+        int "LEDC Output GPIO Num"
+        range 0 50
+        default 3
+        help
+            GPIO number for LEDC output.
+
+endmenu
