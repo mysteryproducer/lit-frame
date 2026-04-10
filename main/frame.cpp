@@ -41,11 +41,11 @@ static i2c_master_bus_config_t i2c_mst_config = {
     .scl_io_num = I2C_MASTER_SCL_IO,
     .clk_source = I2C_CLK_SRC_DEFAULT,
     .glitch_ignore_cnt = 7,
-    .intr_priority = 0,
-    .trans_queue_depth = 10,
+//    .intr_priority = 0,
+//    .trans_queue_depth = 0,
     .flags = {
         .enable_internal_pullup = true,
-        .allow_pd = false
+//        .allow_pd = true
     },
 };
 static VL53L8CX_Configuration 	Dev;			// Sensor configuration 
@@ -95,8 +95,8 @@ static esp_err_t init_vl53l8cx(const i2c_master_bus_config_t *i2c_mst_config, i2
     //Define the i2c device configuration
     i2c_device_config_t dev_cfg = {
             .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-            .device_address = VL53L8CX_DEFAULT_I2C_ADDRESS >> 1,
-            .scl_speed_hz = VL53L8CX_MAX_CLK_SPEED,
+            .device_address = VL53L8CX_DEFAULT_I2C_ADDRESS >> 1, // The API expects a 7-bit address, so we shift the default address
+            .scl_speed_hz = VL53L8CX_MAX_CLK_SPEED
     };
 
     /*********************************/
@@ -106,11 +106,16 @@ static esp_err_t init_vl53l8cx(const i2c_master_bus_config_t *i2c_mst_config, i2
     Dev.platform.bus_config = *i2c_mst_config;
 
     //Register the device
-    i2c_master_bus_add_device(*bus_handle, &dev_cfg, &Dev.platform.handle);
+    if (i2c_master_bus_add_device(*bus_handle, &dev_cfg, &Dev.platform.handle) != ESP_OK) {
+        printf("VL53L8CX device registration failed\n");
+        return ESP_FAIL;
+    }
 
     /* (Optional) Reset sensor */
     Dev.platform.reset_gpio = GPIO_NUM_5;
-    VL53L8CX_Reset_Sensor(&(Dev.platform));
+    if (VL53L8CX_Reset_Sensor(&(Dev.platform)) != ESP_OK) {
+        printf("VL53L8CX reset failed\n");
+    }
 
     /* (Optional) Set a new I2C address if the wanted address is different
     * from the default one (filled with 0x20 for this example).
@@ -127,8 +132,8 @@ static esp_err_t init_vl53l8cx(const i2c_master_bus_config_t *i2c_mst_config, i2
     esp_err_t status = vl53l8cx_is_alive(&Dev, &isAlive);
     if(!isAlive || status)
     {
-        printf("VL53L8CX not detected at requested address\n");
-        return status;
+        printf("VL53L8CX not detected at requested address (status: %i)\n", status);
+        return (status == ESP_OK)?ESP_FAIL:status;
     }
 
     /* (Mandatory) Init VL53L8CX sensor */
@@ -182,16 +187,21 @@ static int16_t read_min() {
 
 extern "C" void app_main(void)
 {
-    ESP_LOGI("Frame","Starting i2c");
+    bool lidar_ok = false;
+    ESP_LOGI("Frame","Starting i2c (scl: %d, sda: %d)", I2C_MASTER_SCL_IO, I2C_MASTER_SDA_IO);
     ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_mst_config, &bus_handle));
     ESP_LOGI("Frame","Starting vl53l8cx");
-    init_vl53l8cx(&i2c_mst_config, &bus_handle);
+    lidar_ok = init_vl53l8cx(&i2c_mst_config, &bus_handle) == ESP_OK;
     ESP_LOGI("Frame","Starting LED controller");
     ledc_init();
     
     std::function<bool ()> read_task_fn = []()
     {
         int16_t distance_mm = read_min();
+        if (distance_mm < 0) {
+//            ESP_LOGE("Frame", "Failed to read distance from VL53L8CX");
+            return false;
+        }
         int16_t pwm_duty = distance_mm * 8192 / 2000; // Map distance to duty cycle (assuming max distance is 2000mm)
         if (pwm_duty > 0) {
             ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, pwm_duty));
@@ -202,18 +212,18 @@ extern "C" void app_main(void)
     };
 
     // Set duty to 0%
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, 4096));
+    ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, 0));
     // Update duty to apply the new value
     ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_CHANNEL));
-    // espp::Timer timer({.period = 20ms,
-    //                     .callback = read_task_fn,
-    //                     .task_config =
-    //                         {
-    //                             .name = "VL53L8CX",
-    //                             .stack_size_bytes{4 * 1024},
-    //                         },
-    //                     .log_level = espp::Logger::Verbosity::INFO
-    //                 });
+    espp::Timer timer({.period = 20ms,
+                        .callback = read_task_fn,
+                        .task_config =
+                            {
+                                .name = "VL53L8CX",
+                                .stack_size_bytes{4 * 1024},
+                            },
+                        .log_level = espp::Logger::Verbosity::INFO
+                    });
     // timer.start();
     // while (true)
     // {
@@ -222,15 +232,20 @@ extern "C" void app_main(void)
     //     ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_CHANNEL));
     // }
 
-    for (int i=0;i<20;++i)
+    for (int i=0;i<20000000;++i)
     {
-        int16_t distance_mm = read_min();
-        int16_t pwm_duty = distance_mm * 8192 / 2000; // Map distance to duty cycle (assuming max distance is 2000mm)
-        if (pwm_duty > 0) {
-            ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, pwm_duty));
-            ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_CHANNEL));
-        }
-        std::this_thread::sleep_for(1s);
+        // if (!lidar_ok) {
+        //     ESP_LOGE("Frame", "VL53L8CX initialization failed, skipping reading");
+        //     std::this_thread::sleep_for(1s);
+        //     continue;
+        // }
+        // int16_t distance_mm = read_min();
+        // int16_t pwm_duty = distance_mm * 8192 / 2000; // Map distance to duty cycle (assuming max distance is 2000mm)
+        // if (pwm_duty > 0) {
+        //     ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, pwm_duty));
+        //     ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_CHANNEL));
+        // }
+        std::this_thread::sleep_for(20ms);
     }
 
 }
